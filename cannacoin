@@ -9,114 +9,134 @@ import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 contract Cannacoin is ERC20Burnable, Ownable {
     using SafeMath for uint256;
 
-    uint256 public constant MAX_SUPPLY = 50000000;
-    uint256 public constant CIRCULATING_SUPPLY = 10000000;
-    uint256 public constant FEE_PERCENT = 10;
+    IERC20 public token;
 
+    // Staking and vault balances
+    mapping(address => uint256) public balanceOf;
     mapping(address => uint256) public stakedBalance;
     mapping(address => mapping(uint256 => uint256)) public vaultRewards;
 
+    // Struct for vault details
     struct Vault {
         uint256 amount;
         uint256 releaseTime;
     }
 
+    // Mapping for user vaults
     mapping(address => Vault[]) public vaults;
 
+    // Events for staking, unstaking, vault operations, and reward claiming
     event Staked(address indexed staker, uint256 amount);
     event Unstaked(address indexed staker, uint256 amount);
     event VaultLocked(address indexed locker, uint256 amount, uint256 releaseTime, uint256 timestamp);
     event VaultUnlocked(address indexed locker, uint256 amount, uint256 timestamp);
     event RewardClaimed(address indexed staker, uint256 amount, uint256 timestamp);
-    event FeeDistributed(address indexed staker, uint256 amount);
-    event TokenSwapped(address indexed swapper, uint256 amountIn, uint256 amountOut);
 
-    // Flexible APR with no lockup
-    uint256 public constant FLEXIBLE_APR = 10;
+    // Penalty parameters
+    uint256 public basePenaltyPercentage = 3; // Base penalty on each transaction
+    uint256 public additionalPenaltyPercentage = 2; // Additional penalty for large transactions
+    uint256 public largeTransactionThreshold = 750000 * 10**18; // Threshold for considering a transaction as large
+    uint256 public largeTransactionPenaltyPercentage = 7; // Penalty percentage for large transactions
 
-    constructor(address initialOwner) ERC20("Cannacoin", "CANN") Ownable(initialOwner) {
-        // Mint initial supply to the contract owner
-        _mint(initialOwner, CIRCULATING_SUPPLY);
+    // Maximum allowed balance
+    uint256 public maxBalance = 25000000 * 10**18; // Maximum allowed balance
+
+    // Governance parameters
+    uint256 public minCoinsForGovernance = 500; // Minimum coins required for governance
+    mapping(address => bool) public isAdmin; // Mapping of admin status for each address
+    mapping(address => bool) public isMember; // Mapping of membership status for each address
+    mapping(address => uint256) public votePower; // Mapping of vote power for each address
+
+    // Governance events
+    event AdminAdded(address indexed admin);
+    event AdminRemoved(address indexed admin);
+    event MemberAdded(address indexed member);
+    event MemberRemoved(address indexed member);
+    event VotePowerUpdated(address indexed member, uint256 votePower);
+
+    // Voting parameters
+    uint256 public votingDuration = 14 days; // Duration for which a vote is open
+    uint256 public proposalPassPercentage = 60; // Percentage needed for a proposal to pass
+    mapping(address => mapping(uint256 => bool)) public hasVoted; // Mapping to track whether an address has voted on a proposal
+    mapping(address => uint256) public voteLockExpiration; // Mapping to track when an address's vote lock expires
+
+    // Voting events
+    event VoteCasted(address indexed voter, uint256 proposalIndex, bool support);
+
+    // Vault lock periods and APRs
+    uint256[] public lockPeriods = [0, 30 days, 90 days, 180 days, 365 days]; // Lock periods in seconds
+    uint256[] public aprs = [0, 10, 36, 75, 200]; // Corresponding APRs in percentage
+
+    // ... (existing code)
+
+    // Event for penalty burning
+    event PenaltyBurn(address indexed sender, address indexed recipient, uint256 amount, uint256 penaltyAmount);
+
+    // Modifier for only members
+    modifier onlyMember() {
+        require(isMember[msg.sender], "Not a member");
+        _;
     }
 
-    function stake(uint256 amount) external {
-        require(amount > 0, "Amount must be greater than zero");
-
-        _burn(msg.sender, amount); // Burn tokens from sender
-        stakedBalance[msg.sender] = stakedBalance[msg.sender].add(amount);
-
-        emit Staked(msg.sender, amount);
+    // Modifier for only admins
+    modifier onlyAdmin() {
+        require(isAdmin[msg.sender], "Not an admin");
+        _;
     }
 
-    function unstake(uint256 amount) external {
-        require(amount > 0 && amount <= stakedBalance[msg.sender], "Invalid unstake amount");
-
-        stakedBalance[msg.sender] = stakedBalance[msg.sender].sub(amount);
-        _mint(msg.sender, amount); // Mint tokens to sender
-
-        emit Unstaked(msg.sender, amount);
+    // Modifier for only members and admins
+    modifier onlyMemberOrAdmin() {
+        require(isMember[msg.sender] || isAdmin[msg.sender], "Not a member or admin");
+        _;
     }
 
-    function lockInVault(uint256 amount, uint256 releaseTimeInSeconds) external {
-        require(amount > 0, "Invalid vault amount");
-        require(releaseTimeInSeconds > block.timestamp, "Invalid release time");
-
-        _burn(msg.sender, amount); // Burn tokens from sender
-        vaults[msg.sender].push(Vault(amount, releaseTimeInSeconds));
-
-        emit VaultLocked(msg.sender, amount, releaseTimeInSeconds, block.timestamp);
+    // Function to set the maximum allowed balance
+    function setMaxBalance(uint256 _maxBalance) external onlyOwner {
+        maxBalance = _maxBalance;
     }
 
-    function unlockVault(uint256 vaultIndex) external {
-        require(vaultIndex < vaults[msg.sender].length, "Invalid vault index");
-        Vault storage vault = vaults[msg.sender][vaultIndex];
-        require(block.timestamp >= vault.releaseTime, "Vault still locked");
+    // Function to add an address as an admin
+    function addAdmin(address _admin) external onlyOwner {
+        isAdmin[_admin] = true;
+        emit AdminAdded(_admin);
+    }
 
-        stakedBalance[msg.sender] = stakedBalance[msg.sender].add(vault.amount);
-        emit VaultUnlocked(msg.sender, vault.amount, block.timestamp);
+    // Function to remove an address as an admin
+    function removeAdmin(address _admin) external onlyOwner {
+        isAdmin[_admin] = false;
+        emit AdminRemoved(_admin);
+    }
 
-        // Calculate and distribute the reward based on the flexible APR
-        uint256 reward = calculateReward(vault.amount, FLEXIBLE_APR);
-        vaultRewards[msg.sender][vaultIndex] = reward;
-        emit RewardClaimed(msg.sender, reward, block.timestamp);
+    // Function to add an address as a member
+    function addMember(address _member) external onlyOwner {
+        isMember[_member] = true;
+        emit MemberAdded(_member);
+    }
 
-        // Remove the unlocked vault
-        if (vaultIndex != vaults[msg.sender].length - 1) {
-            vaults[msg.sender][vaultIndex] = vaults[msg.sender][vaults[msg.sender].length - 1];
+    // Function to remove an address as a member
+    function removeMember(address _member) external onlyOwner {
+        isMember[_member] = false;
+        emit MemberRemoved(_member);
+    }
+
+    // Function to update vote power for an address based on coin holdings
+    function updateVotePower() external {
+        uint256 coinsHeld = balanceOf[msg.sender];
+
+        if (coinsHeld >= 1000000 * 10**18) {
+            votePower[msg.sender] = 4;
+        } else if (coinsHeld >= 100000 * 10**18) {
+            votePower[msg.sender] = 3;
+        } else if (coinsHeld >= 1000 * 10**18) {
+            votePower[msg.sender] = 2;
+        } else if (coinsHeld >= 500 * 10**18) {
+            votePower[msg.sender] = 1;
+        } else {
+            votePower[msg.sender] = 0;
         }
-        vaults[msg.sender].pop();
+
+        emit VotePowerUpdated(msg.sender, votePower[msg.sender]);
     }
 
-    function distributeFees() external {
-        uint256 totalFees = totalSupply().mul(FEE_PERCENT).div(100);
-        uint256 stakerReward = totalFees.mul(9).div(10); // 90% to stakers
-        _mint(address(this), totalFees);
-
-        // Distribute fees to stakers
-        uint256 stakerCount = 0;
-        for (uint256 i = 0; i < vaults[msg.sender].length; i++) {
-            stakerCount++;
-            vaultRewards[msg.sender][i] = stakerReward.div(stakerCount);
-            emit FeeDistributed(msg.sender, vaultRewards[msg.sender][i]);
-        }
-    }
-
-    // Function to swap tokens (Placeholder, adapt for L2)
-    function swapTokens(uint256 amountIn) external {
-        require(amountIn > 0, "Amount must be greater than zero");
-
-        // Burn tokens from the sender
-        _burn(msg.sender, amountIn);
-
-        // Placeholder for L2 token swap
-        // Adapt this function for your specific Layer 2 solution
-        emit TokenSwapped(msg.sender, amountIn, 0);
-    }
-
-    // Additional functions...
-
-    // Function to calculate reward based on APR
-    function calculateReward(uint256 amount, uint256 apr) internal pure returns (uint256) {
-        return amount.mul(apr).div(100);
-    }
+    // ... (existing code)
 }
