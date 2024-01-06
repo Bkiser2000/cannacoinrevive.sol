@@ -1,0 +1,122 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+
+contract Cannacoin is ERC20Burnable, Ownable {
+    using SafeMath for uint256;
+
+    uint256 public constant MAX_SUPPLY = 50000000;
+    uint256 public constant CIRCULATING_SUPPLY = 10000000;
+    uint256 public constant FEE_PERCENT = 10;
+
+    mapping(address => uint256) public stakedBalance;
+    mapping(address => mapping(uint256 => uint256)) public vaultRewards;
+
+    struct Vault {
+        uint256 amount;
+        uint256 releaseTime;
+    }
+
+    mapping(address => Vault[]) public vaults;
+
+    event Staked(address indexed staker, uint256 amount);
+    event Unstaked(address indexed staker, uint256 amount);
+    event VaultLocked(address indexed locker, uint256 amount, uint256 releaseTime, uint256 timestamp);
+    event VaultUnlocked(address indexed locker, uint256 amount, uint256 timestamp);
+    event RewardClaimed(address indexed staker, uint256 amount, uint256 timestamp);
+    event FeeDistributed(address indexed staker, uint256 amount);
+    event TokenSwapped(address indexed swapper, uint256 amountIn, uint256 amountOut);
+
+    // Flexible APR with no lockup
+    uint256 public constant FLEXIBLE_APR = 10;
+
+    constructor(address initialOwner) ERC20("Cannacoin", "CANN") Ownable(initialOwner) {
+        // Mint initial supply to the contract owner
+        _mint(initialOwner, CIRCULATING_SUPPLY);
+    }
+
+    function stake(uint256 amount) external {
+        require(amount > 0, "Amount must be greater than zero");
+
+        _burn(msg.sender, amount); // Burn tokens from sender
+        stakedBalance[msg.sender] = stakedBalance[msg.sender].add(amount);
+
+        emit Staked(msg.sender, amount);
+    }
+
+    function unstake(uint256 amount) external {
+        require(amount > 0 && amount <= stakedBalance[msg.sender], "Invalid unstake amount");
+
+        stakedBalance[msg.sender] = stakedBalance[msg.sender].sub(amount);
+        _mint(msg.sender, amount); // Mint tokens to sender
+
+        emit Unstaked(msg.sender, amount);
+    }
+
+    function lockInVault(uint256 amount, uint256 releaseTimeInSeconds) external {
+        require(amount > 0, "Invalid vault amount");
+        require(releaseTimeInSeconds > block.timestamp, "Invalid release time");
+
+        _burn(msg.sender, amount); // Burn tokens from sender
+        vaults[msg.sender].push(Vault(amount, releaseTimeInSeconds));
+
+        emit VaultLocked(msg.sender, amount, releaseTimeInSeconds, block.timestamp);
+    }
+
+    function unlockVault(uint256 vaultIndex) external {
+        require(vaultIndex < vaults[msg.sender].length, "Invalid vault index");
+        Vault storage vault = vaults[msg.sender][vaultIndex];
+        require(block.timestamp >= vault.releaseTime, "Vault still locked");
+
+        stakedBalance[msg.sender] = stakedBalance[msg.sender].add(vault.amount);
+        emit VaultUnlocked(msg.sender, vault.amount, block.timestamp);
+
+        // Calculate and distribute the reward based on the flexible APR
+        uint256 reward = calculateReward(vault.amount, FLEXIBLE_APR);
+        vaultRewards[msg.sender][vaultIndex] = reward;
+        emit RewardClaimed(msg.sender, reward, block.timestamp);
+
+        // Remove the unlocked vault
+        if (vaultIndex != vaults[msg.sender].length - 1) {
+            vaults[msg.sender][vaultIndex] = vaults[msg.sender][vaults[msg.sender].length - 1];
+        }
+        vaults[msg.sender].pop();
+    }
+
+    function distributeFees() external {
+        uint256 totalFees = totalSupply().mul(FEE_PERCENT).div(100);
+        uint256 stakerReward = totalFees.mul(9).div(10); // 90% to stakers
+        _mint(address(this), totalFees);
+
+        // Distribute fees to stakers
+        uint256 stakerCount = 0;
+        for (uint256 i = 0; i < vaults[msg.sender].length; i++) {
+            stakerCount++;
+            vaultRewards[msg.sender][i] = stakerReward.div(stakerCount);
+            emit FeeDistributed(msg.sender, vaultRewards[msg.sender][i]);
+        }
+    }
+
+    // Function to swap tokens (Placeholder, adapt for L2)
+    function swapTokens(uint256 amountIn) external {
+        require(amountIn > 0, "Amount must be greater than zero");
+
+        // Burn tokens from the sender
+        _burn(msg.sender, amountIn);
+
+        // Placeholder for L2 token swap
+        // Adapt this function for your specific Layer 2 solution
+        emit TokenSwapped(msg.sender, amountIn, 0);
+    }
+
+    // Additional functions...
+
+    // Function to calculate reward based on APR
+    function calculateReward(uint256 amount, uint256 apr) internal pure returns (uint256) {
+        return amount.mul(apr).div(100);
+    }
+}
